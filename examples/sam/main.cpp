@@ -573,8 +573,16 @@ bool sam_encode(
     const int32_t n_window_size = hparams.n_window_size();
     const int32_t n_patch_size  = hparams.n_patch_size();
 
-    static size_t buf_size = 1024u*1024*1024;
+    static size_t buf_size = 256u*1024*1024;
     static void * buf = malloc(buf_size);
+
+    // use 2 scratch buffers
+    // TODO: very hacky solution - reimplement in a more elegant way
+    static size_t scr0_size = 2048u*1024*1024;
+    static void * scr0 = malloc(scr0_size);
+
+    static size_t scr1_size = 512u*1024*1024;
+    static void * scr1 = malloc(scr1_size);
 
     struct ggml_init_params params = {
         .mem_size   = buf_size,
@@ -631,6 +639,8 @@ bool sam_encode(
     for (int il = 0; il < n_enc_layer; ++il) {
         const auto & layer = model.layers_enc[il];
 
+        ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
+
         // norm
         // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py#L168
         {
@@ -644,14 +654,19 @@ bool sam_encode(
                     ggml_repeat(ctx0, layer.norm1_b, cur));
         }
 
-        const int w0 = cur->ne[1];
-        const int h0 = cur->ne[2];
+        const int64_t w0 = cur->ne[1];
+        const int64_t h0 = cur->ne[2];
 
         if (hparams.is_global_attn(il) == false) {
             // local attention layer - apply window partition
             // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py#L169-L172
             cur = ggml_win_part(ctx0, cur, n_window_size);
         }
+
+        const int64_t W = cur->ne[1];
+        const int64_t H = cur->ne[2];
+
+        ggml_set_scratch(ctx0, { 0, scr1_size, scr1, });
 
         // self-attention
         {
@@ -666,27 +681,29 @@ bool sam_encode(
             // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py#L225-L229
             const int B = cur->ne[3];
 
-            cur = ggml_reshape_4d(ctx0, cur, n_enc_state, 3, n_window_size*n_window_size, B);
+            cur = ggml_reshape_4d(ctx0, cur, n_enc_state, 3, W*H, B);
             cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 3, 1, 2));
 
             struct ggml_tensor * Q;
             struct ggml_tensor * K;
             struct ggml_tensor * V;
 
-            Q = ggml_view_3d   (ctx0, cur, n_enc_state, n_window_size*n_window_size, B, cur->nb[1], cur->nb[2], 0*cur->nb[3]);
-            Q = ggml_reshape_4d(ctx0, Q,   n_enc_head_dim, n_enc_head, n_window_size*n_window_size, B);
+            Q = ggml_view_3d   (ctx0, cur, n_enc_state, W*H, B, cur->nb[1], cur->nb[2], 0*cur->nb[3]);
+            Q = ggml_reshape_4d(ctx0, Q,   n_enc_head_dim, n_enc_head, W*H, B);
             Q = ggml_cont      (ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
-            Q = ggml_reshape_3d(ctx0, Q,   n_enc_head_dim, n_window_size*n_window_size, B*n_enc_head);
+            Q = ggml_reshape_3d(ctx0, Q,   n_enc_head_dim, W*H, B*n_enc_head);
 
-            K = ggml_view_3d   (ctx0, cur, n_enc_state, n_window_size*n_window_size, B, cur->nb[1], cur->nb[2], 1*cur->nb[3]);
-            K = ggml_reshape_4d(ctx0, K,   n_enc_head_dim, n_enc_head, n_window_size*n_window_size, B);
+            K = ggml_view_3d   (ctx0, cur, n_enc_state, W*H, B, cur->nb[1], cur->nb[2], 1*cur->nb[3]);
+            K = ggml_reshape_4d(ctx0, K,   n_enc_head_dim, n_enc_head, W*H, B);
             K = ggml_cont      (ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
-            K = ggml_reshape_3d(ctx0, K,   n_enc_head_dim, n_window_size*n_window_size, B*n_enc_head);
+            K = ggml_reshape_3d(ctx0, K,   n_enc_head_dim, W*H, B*n_enc_head);
 
-            V = ggml_view_3d   (ctx0, cur, n_enc_state, n_window_size*n_window_size, B, cur->nb[1], cur->nb[2], 2*cur->nb[3]);
-            V = ggml_reshape_4d(ctx0, V,   n_enc_head_dim, n_enc_head, n_window_size*n_window_size, B);
+            V = ggml_view_3d   (ctx0, cur, n_enc_state, W*H, B, cur->nb[1], cur->nb[2], 2*cur->nb[3]);
+            V = ggml_reshape_4d(ctx0, V,   n_enc_head_dim, n_enc_head, W*H, B);
             V = ggml_cont      (ctx0, ggml_permute(ctx0, V, 1, 2, 0, 3)); // transposed
-            V = ggml_reshape_3d(ctx0, V,   n_window_size*n_window_size, n_enc_head_dim, B*n_enc_head);
+            V = ggml_reshape_3d(ctx0, V,   W*H, n_enc_head_dim, B*n_enc_head);
+
+            ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
 
             struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
 
@@ -696,10 +713,10 @@ bool sam_encode(
                         ggml_new_f32(ctx0, 1.0f/sqrtf(n_enc_head_dim))
                         );
 
-            struct ggml_tensor * rw = ggml_get_rel_pos(ctx0, layer.rel_pos_w, n_window_size, n_window_size);
-            struct ggml_tensor * rh = ggml_get_rel_pos(ctx0, layer.rel_pos_h, n_window_size, n_window_size);
+            struct ggml_tensor * rw = ggml_get_rel_pos(ctx0, layer.rel_pos_w, W, W);
+            struct ggml_tensor * rh = ggml_get_rel_pos(ctx0, layer.rel_pos_h, H, H);
 
-            struct ggml_tensor * q_r = ggml_reshape_4d(ctx0, Q, n_enc_head_dim, n_window_size, n_window_size, B*n_enc_head);
+            struct ggml_tensor * q_r = ggml_reshape_4d(ctx0, Q, n_enc_head_dim, W, H, B*n_enc_head);
 
             struct ggml_tensor * rel_w = ggml_cont(ctx0, ggml_permute(ctx0,
                         ggml_mul_mat(ctx0,
@@ -718,9 +735,9 @@ bool sam_encode(
                 ggml_reshape_4d(ctx0,
                         ggml_cont(ctx0,
                             ggml_permute(ctx0,
-                                ggml_reshape_4d(ctx0, KQV, n_enc_head_dim, n_window_size*n_window_size, n_enc_head, B),
+                                ggml_reshape_4d(ctx0, KQV, n_enc_head_dim, W*H, n_enc_head, B),
                                 0, 2, 1, 3)),
-                        n_enc_state, n_window_size, n_window_size, B);
+                        n_enc_state, W, H, B);
 
             cur = ggml_mul_mat(ctx0, layer.proj_w, cur);
             cur = ggml_add(ctx0,
@@ -736,6 +753,8 @@ bool sam_encode(
         }
 
         cur = ggml_add(ctx0, inpL, cur);
+
+        ggml_set_scratch(ctx0, { 0, scr1_size, scr1, });
 
         struct ggml_tensor * inpFF = cur;
 
@@ -776,14 +795,14 @@ bool sam_encode(
         }
 
         inpL = ggml_add(ctx0, cur, inpFF);
-
-        cur = inpL; // tmp
-        ggml_set_name(inpL, "check");
-
-        // TODO: feed-forward
-
-        break;
     }
+
+    ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
+
+    cur = inpL; // tmp
+    ggml_set_name(inpL, "check");
+
+    ggml_set_scratch(ctx0, { 0, 0, nullptr, });
 
     // run the computation
     ggml_build_forward_expand(&gf, cur);
