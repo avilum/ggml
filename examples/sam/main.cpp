@@ -716,11 +716,11 @@ bool sam_encode(
 
             cur =
                 ggml_reshape_4d(ctx0,
-                    ggml_cont(ctx0,
-                        ggml_permute(ctx0,
+                        ggml_cont(ctx0,
+                            ggml_permute(ctx0,
                                 ggml_reshape_4d(ctx0, KQV, n_enc_head_dim, n_window_size*n_window_size, n_enc_head, B),
                                 0, 2, 1, 3)),
-                    n_enc_state, n_window_size, n_window_size, B);
+                        n_enc_state, n_window_size, n_window_size, B);
 
             cur = ggml_mul_mat(ctx0, layer.proj_w, cur);
             cur = ggml_add(ctx0,
@@ -737,7 +737,48 @@ bool sam_encode(
 
         cur = ggml_add(ctx0, inpL, cur);
 
-        ggml_set_name(cur, "check");
+        struct ggml_tensor * inpFF = cur;
+
+        // feed-forward network
+        {
+            // norm
+            {
+                cur = ggml_norm(ctx0, inpFF);
+
+                // cur = mlp_ln_w*cur + mlp_ln_b
+                cur = ggml_add(ctx0,
+                        ggml_mul(ctx0,
+                            ggml_repeat(ctx0, layer.norm2_w, cur),
+                            cur),
+                        ggml_repeat(ctx0, layer.norm2_b, cur));
+            }
+
+            // fully connected
+            cur = ggml_mul_mat(ctx0,
+                    layer.mlp_lin1_w,
+                    cur);
+
+            cur = ggml_add(ctx0,
+                    ggml_repeat(ctx0, layer.mlp_lin1_b, cur),
+                    cur);
+
+            // GELU activation
+            cur = ggml_gelu(ctx0, cur);
+
+            // projection
+            cur = ggml_mul_mat(ctx0,
+                    layer.mlp_lin2_w,
+                    cur);
+
+            cur = ggml_add(ctx0,
+                    ggml_repeat(ctx0, layer.mlp_lin2_b, cur),
+                    cur);
+        }
+
+        inpL = ggml_add(ctx0, cur, inpFF);
+
+        cur = inpL; // tmp
+        ggml_set_name(inpL, "check");
 
         // TODO: feed-forward
 
