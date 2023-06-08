@@ -573,7 +573,7 @@ bool sam_encode(
     const int32_t n_window_size = hparams.n_window_size();
     const int32_t n_patch_size  = hparams.n_patch_size();
 
-    static size_t buf_size = 512u*1024*1024;
+    static size_t buf_size = 1024u*1024*1024;
     static void * buf = malloc(buf_size);
 
     struct ggml_init_params params = {
@@ -696,15 +696,11 @@ bool sam_encode(
                         ggml_new_f32(ctx0, 1.0f/sqrtf(n_enc_head_dim))
                         );
 
-            printf("KQ_scaled: %d %d %d %d\n", KQ_scaled->ne[0], KQ_scaled->ne[1], KQ_scaled->ne[2], KQ_scaled->ne[3]);
-
             struct ggml_tensor * rw = ggml_get_rel_pos(ctx0, layer.rel_pos_w, n_window_size, n_window_size);
             struct ggml_tensor * rh = ggml_get_rel_pos(ctx0, layer.rel_pos_h, n_window_size, n_window_size);
 
             struct ggml_tensor * q_r = ggml_reshape_4d(ctx0, Q, n_enc_head_dim, n_window_size, n_window_size, B*n_enc_head);
 
-            printf("rw:  %d %d %d %d\n", rw->ne[0],  rw->ne[1],  rw->ne[2],  rw->ne[3]);
-            printf("q_r: %d %d %d %d\n", q_r->ne[0], q_r->ne[1], q_r->ne[2], q_r->ne[3]);
             struct ggml_tensor * rel_w = ggml_cont(ctx0, ggml_permute(ctx0,
                         ggml_mul_mat(ctx0,
                             rw,
@@ -716,13 +712,22 @@ bool sam_encode(
 
             struct ggml_tensor * KQ_soft_max = ggml_soft_max_inplace(ctx0, attn);
 
-            printf("V:   %d %d %d %d\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
-            printf("KQV: %d %d %d %d\n", KQ_soft_max->ne[0], KQ_soft_max->ne[1], KQ_soft_max->ne[2], KQ_soft_max->ne[3]);
-
             struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V, KQ_soft_max);
 
-            ggml_build_forward_expand(&gf, KQV);
-            ggml_set_name(KQV, "check");
+            cur =
+                ggml_reshape_4d(ctx0,
+                    ggml_cont(ctx0,
+                        ggml_permute(ctx0,
+                                ggml_reshape_4d(ctx0, KQV, n_enc_head_dim, n_window_size*n_window_size, n_enc_head, B),
+                                0, 2, 1, 3)),
+                    n_enc_state, n_window_size, n_window_size, B);
+
+            cur = ggml_mul_mat(ctx0, layer.proj_w, cur);
+            cur = ggml_add(ctx0,
+                    ggml_repeat(ctx0,
+                        layer.proj_b,
+                        cur),
+                    cur);
         }
 
         if (hparams.is_global_attn(il) == false) {
@@ -730,7 +735,9 @@ bool sam_encode(
             cur = ggml_win_unpart(ctx0, cur, w0, h0, n_window_size);
         }
 
-        //cur = ggml_add(ctx0, inpL, cur);
+        cur = ggml_add(ctx0, inpL, cur);
+
+        ggml_set_name(cur, "check");
 
         // TODO: feed-forward
 
@@ -758,9 +765,9 @@ bool sam_encode(
             //    printf("\n");
             //}
             //printf("\n");
-            for (int y = 0; y < 14; ++y) {
-                for (int x = 0; x < 14; ++x) {
-                    printf("%7.4f ", data[(y*196 + x)*64 + 10]);
+            for (int y = 0; y < 64; ++y) {
+                for (int x = 0; x < 64; ++x) {
+                    printf("%7.4f ", data[(y*64 + x)*768 + 231]);
                 }
                 printf("\n");
             }
