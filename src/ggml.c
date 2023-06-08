@@ -3554,12 +3554,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "WIN_PART",
     "WIN_UNPART",
     "GET_REL_POS",
+    "ADD_REL_POS",
 
     "MAP_UNARY",
     "MAP_BINARY",
 };
 
-static_assert(GGML_OP_COUNT == 55, "GGML_OP_COUNT != 55");
+static_assert(GGML_OP_COUNT == 56, "GGML_OP_COUNT != 56");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -3619,12 +3620,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "win_part(x)",
     "win_unpart(x)",
     "get_rel_pos(x)",
+    "add_rel_pos(x)",
 
     "f(x)",
     "f(x,y)",
 };
 
-static_assert(GGML_OP_COUNT == 55, "GGML_OP_COUNT != 55");
+static_assert(GGML_OP_COUNT == 56, "GGML_OP_COUNT != 56");
 
 static_assert(sizeof(struct ggml_object)%GGML_MEM_ALIGN == 0, "ggml_object size must be a multiple of GGML_MEM_ALIGN");
 static_assert(sizeof(struct ggml_tensor)%GGML_MEM_ALIGN == 0, "ggml_tensor size must be a multiple of GGML_MEM_ALIGN");
@@ -6634,10 +6636,10 @@ struct ggml_tensor * ggml_win_unpart(
 struct ggml_tensor * ggml_get_rel_pos(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
-        int                   q_h,
-        int                   k_h) {
-    GGML_ASSERT(q_h == k_h);
-    GGML_ASSERT(2*MAX(q_h, k_h) - 1 == a->ne[1]);
+        int                   qh,
+        int                   kh) {
+    GGML_ASSERT(qh == kh);
+    GGML_ASSERT(2*MAX(qh, kh) - 1 == a->ne[1]);
 
     bool is_node = false;
 
@@ -6646,13 +6648,52 @@ struct ggml_tensor * ggml_get_rel_pos(
         is_node = true;
     }
 
-    const int64_t ne[4] = { a->ne[0], k_h, q_h, 1, };
+    const int64_t ne[4] = { a->ne[0], kh, qh, 1, };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F16, 3, ne);
 
     result->op   = GGML_OP_GET_REL_POS;
     result->grad = is_node ? ggml_dup_tensor(ctx, result) : NULL;
     result->src0 = a;
     result->src1 = NULL;
+
+    return result;
+}
+
+// ggml_add_rel_pos
+
+struct ggml_tensor * ggml_add_rel_pos(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * pw,
+        struct ggml_tensor  * ph) {
+    GGML_ASSERT(pw->ne[0] == ph->ne[0]);
+    GGML_ASSERT(pw->ne[1] == ph->ne[1]);
+    GGML_ASSERT(pw->ne[2] == ph->ne[2]);
+    GGML_ASSERT(pw->ne[3] == ph->ne[3]);
+    GGML_ASSERT(pw->ne[3] == a->ne[2]);
+    GGML_ASSERT(pw->ne[0]*ph->ne[0] == a->ne[0]);
+    GGML_ASSERT(pw->ne[1]*pw->ne[2] == a->ne[1]);
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(ggml_is_contiguous(pw));
+    GGML_ASSERT(ggml_is_contiguous(ph));
+    GGML_ASSERT(pw->type == GGML_TYPE_F32);
+    GGML_ASSERT(ph->type == GGML_TYPE_F32);
+
+    bool is_node = false;
+
+    if (a->grad) {
+        GGML_ASSERT(false); // TODO: implement backward
+        is_node = true;
+    }
+
+    const int64_t ne[4] = { a->ne[0], a->ne[1], a->ne[2], 1, };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
+
+    result->op   = GGML_OP_ADD_REL_POS;
+    result->grad = is_node ? ggml_dup_tensor(ctx, result) : NULL;
+    result->src0 = a;
+    result->src1 = pw;
+    result->opt[0] = ph;
 
     return result;
 }
@@ -13272,6 +13313,78 @@ static void ggml_compute_forward_get_rel_pos(
     }
 }
 
+// ggml_compute_forward_add_rel_pos
+
+static void ggml_compute_forward_add_rel_pos_f32(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        const struct ggml_tensor * src1,
+        const struct ggml_tensor * opt0,
+        struct ggml_tensor * dst) {
+    if (params->type == GGML_TASK_INIT || params->type == GGML_TASK_FINALIZE) {
+        return;
+    }
+
+    // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py#L357-L359
+
+    const int64_t ne10 = src1->ne[0];
+    const int64_t ne11 = src1->ne[1];
+    const int64_t ne12 = src1->ne[2];
+    const int64_t ne13 = src1->ne[3];
+
+    const int64_t ne0 = dst->ne[0];
+    const int64_t ne1 = dst->ne[1];
+    const int64_t ne2 = dst->ne[2];
+
+    float * src0_data = (float *) src0->data;
+    float * src1_data = (float *) src1->data;
+    float * opt0_data = (float *) opt0->data;
+    float * dst_data  = (float *) dst->data;
+
+    memcpy(dst_data, src0_data, ne0*ne1*ne2*sizeof(float));
+
+    for (int64_t i13 = 0; i13 < ne13; ++i13) {
+        for (int64_t i12 = 0; i12 < ne12; ++i12) {
+            for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                for (int64_t i10 = 0; i10 < ne10; ++i10) {
+                    // add rel pos W (src1) to src0
+                    const int64_t i2 = i11;
+                    const int64_t i3 = i12;
+                    const int64_t i4 = i13;
+
+                    const int64_t jp  = i13*ne12*ne11*ne10 + i12*ne11*ne10 + i11*ne10 + i10;
+
+                    const int64_t jdw = i4*ne1*ne0 + (i3*ne11 + i2)*ne0 + i10;
+                    const int64_t jdh = i4*ne1*ne0 + (i3*ne11 + i2)*ne0 + i10*ne10;
+
+                    for (int64_t j = 0; j < ne10; ++j) {
+                        dst_data[jdw + j*ne10] += src1_data[jp];
+                        dst_data[jdh + j     ] += opt0_data[jp];
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void ggml_compute_forward_add_rel_pos(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        const struct ggml_tensor * src1,
+        const struct ggml_tensor * opt0,
+        struct ggml_tensor * dst) {
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_add_rel_pos_f32(params, src0, src1, opt0, dst);
+            } break;
+        default:
+            {
+                GGML_ASSERT(false);
+            } break;
+    }
+}
+
 // ggml_compute_forward_map_unary
 
 static void ggml_compute_forward_map_unary_f32(
@@ -13581,6 +13694,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_GET_REL_POS:
             {
                 ggml_compute_forward_get_rel_pos(params, tensor->src0, tensor);
+            } break;
+        case GGML_OP_ADD_REL_POS:
+            {
+                ggml_compute_forward_add_rel_pos(params, tensor->src0, tensor->src1, tensor->opt[0], tensor);
             } break;
         case GGML_OP_MAP_UNARY:
             {
@@ -14283,6 +14400,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
         case GGML_OP_WIN_PART:
         case GGML_OP_WIN_UNPART:
         case GGML_OP_GET_REL_POS:
+        case GGML_OP_ADD_REL_POS:
         case GGML_OP_MAP_UNARY:
         case GGML_OP_MAP_BINARY:
             {
@@ -14885,6 +15003,7 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
                 case GGML_OP_WIN_PART:
                 case GGML_OP_WIN_UNPART:
                 case GGML_OP_GET_REL_POS:
+                case GGML_OP_ADD_REL_POS:
                 case GGML_OP_MAP_UNARY:
                 case GGML_OP_MAP_BINARY:
                     {

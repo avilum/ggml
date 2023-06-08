@@ -696,6 +696,8 @@ bool sam_encode(
                         ggml_new_f32(ctx0, 1.0f/sqrtf(n_enc_head_dim))
                         );
 
+            printf("KQ_scaled: %d %d %d %d\n", KQ_scaled->ne[0], KQ_scaled->ne[1], KQ_scaled->ne[2], KQ_scaled->ne[3]);
+
             struct ggml_tensor * rw = ggml_get_rel_pos(ctx0, layer.rel_pos_w, n_window_size, n_window_size);
             struct ggml_tensor * rh = ggml_get_rel_pos(ctx0, layer.rel_pos_h, n_window_size, n_window_size);
 
@@ -710,8 +712,10 @@ bool sam_encode(
                         0, 2, 1, 3));
             struct ggml_tensor * rel_h = ggml_mul_mat(ctx0, rh, q_r);
 
-            ggml_build_forward_expand(&gf, rel_w);
-            ggml_set_name(rel_w, "check");
+            struct ggml_tensor * attn = ggml_add_rel_pos(ctx0, KQ_scaled, rel_w, rel_h);
+
+            ggml_build_forward_expand(&gf, attn);
+            ggml_set_name(attn, "check");
         }
 
         if (hparams.is_global_attn(il) == false) {
@@ -749,7 +753,7 @@ bool sam_encode(
             //printf("\n");
             for (int y = 0; y < 14; ++y) {
                 for (int x = 0; x < 14; ++x) {
-                    printf("%7.4f ", data[(153*14*14 + y*14 + x)*14 + 10]);
+                    printf("%7.4f ", data[(y*196 + x)*196 + 10]);
                 }
                 printf("\n");
             }
