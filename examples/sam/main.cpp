@@ -714,8 +714,10 @@ bool sam_encode(
 
             struct ggml_tensor * attn = ggml_add_rel_pos(ctx0, KQ_scaled, rel_w, rel_h);
 
-            ggml_build_forward_expand(&gf, attn);
-            ggml_set_name(attn, "check");
+            struct ggml_tensor * KQ_soft_max = ggml_soft_max_inplace(ctx0, attn);
+
+            ggml_build_forward_expand(&gf, KQ_soft_max);
+            ggml_set_name(KQ_soft_max, "check");
         }
 
         if (hparams.is_global_attn(il) == false) {
