@@ -685,8 +685,8 @@ bool sam_encode(
 
             V = ggml_view_3d   (ctx0, cur, n_enc_state, n_window_size*n_window_size, B, cur->nb[1], cur->nb[2], 2*cur->nb[3]);
             V = ggml_reshape_4d(ctx0, V,   n_enc_head_dim, n_enc_head, n_window_size*n_window_size, B);
-            V = ggml_cont      (ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
-            V = ggml_reshape_3d(ctx0, V,   n_enc_head_dim, n_window_size*n_window_size, B*n_enc_head);
+            V = ggml_cont      (ctx0, ggml_permute(ctx0, V, 1, 2, 0, 3)); // transposed
+            V = ggml_reshape_3d(ctx0, V,   n_window_size*n_window_size, n_enc_head_dim, B*n_enc_head);
 
             struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
 
@@ -716,8 +716,13 @@ bool sam_encode(
 
             struct ggml_tensor * KQ_soft_max = ggml_soft_max_inplace(ctx0, attn);
 
-            ggml_build_forward_expand(&gf, KQ_soft_max);
-            ggml_set_name(KQ_soft_max, "check");
+            printf("V:   %d %d %d %d\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
+            printf("KQV: %d %d %d %d\n", KQ_soft_max->ne[0], KQ_soft_max->ne[1], KQ_soft_max->ne[2], KQ_soft_max->ne[3]);
+
+            struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V, KQ_soft_max);
+
+            ggml_build_forward_expand(&gf, KQV);
+            ggml_set_name(KQV, "check");
         }
 
         if (hparams.is_global_attn(il) == false) {
@@ -755,7 +760,7 @@ bool sam_encode(
             //printf("\n");
             for (int y = 0; y < 14; ++y) {
                 for (int x = 0; x < 14; ++x) {
-                    printf("%7.4f ", data[(y*196 + x)*196 + 10]);
+                    printf("%7.4f ", data[(y*196 + x)*64 + 10]);
                 }
                 printf("\n");
             }
