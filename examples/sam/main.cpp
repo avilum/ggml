@@ -799,8 +799,26 @@ bool sam_encode(
 
     ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
 
-    cur = inpL; // tmp
-    ggml_set_name(inpL, "check");
+    cur = ggml_cont(ctx0, ggml_permute(ctx0, inpL, 2, 0, 1, 3));
+
+    cur = ggml_conv_2d_sk_p0(ctx0, model.neck_conv_0, cur);
+
+    // LayerNorm2d
+    {
+        // normalize along channel dimmension
+        // TODO: better implementation
+        cur = ggml_cont(ctx0, ggml_permute(ctx0,
+                    ggml_norm(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3))),
+                    2, 0, 1, 3));
+
+        cur = ggml_add(ctx0,
+                ggml_mul(ctx0,
+                    ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_w, 1, 1, 256), cur),
+                    cur),
+                ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_b, 1, 1, 256), cur));
+    }
+
+    ggml_set_name(cur, "check");
 
     ggml_set_scratch(ctx0, { 0, 0, nullptr, });
 
@@ -827,7 +845,7 @@ bool sam_encode(
             //printf("\n");
             for (int y = 0; y < 64; ++y) {
                 for (int x = 0; x < 64; ++x) {
-                    printf("%7.4f ", data[(y*64 + x)*768 + 231]);
+                    printf("%5.2f ", data[(y*64 + x)*64 + 41]);
                 }
                 printf("\n");
             }
