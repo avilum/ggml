@@ -813,10 +813,28 @@ bool sam_encode(
 
         cur = ggml_add(ctx0,
                 ggml_mul(ctx0,
-                    ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_w, 1, 1, 256), cur),
+                    ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_w, 1, 1, n_enc_out_chans), cur),
                     cur),
-                ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_b, 1, 1, 256), cur));
+                ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_0_b, 1, 1, n_enc_out_chans), cur));
     }
+
+    cur = ggml_conv_2d_s1_ph(ctx0, model.neck_conv_1, cur);
+
+    // LayerNorm2d
+    {
+        // normalize along channel dimmension
+        // TODO: better implementation
+        cur = ggml_cont(ctx0, ggml_permute(ctx0,
+                    ggml_norm(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3))),
+                    2, 0, 1, 3));
+
+        cur = ggml_add(ctx0,
+                ggml_mul(ctx0,
+                    ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_1_w, 1, 1, n_enc_out_chans), cur),
+                    cur),
+                ggml_repeat(ctx0, ggml_reshape_3d(ctx0, model.neck_norm_1_b, 1, 1, n_enc_out_chans), cur));
+    }
+
 
     ggml_set_name(cur, "check");
 
